@@ -1,0 +1,7 @@
+c This is a test cnf file.
+c This is a comment line.
+p cnf 4 4
+1 2 0
+-1 -2 0
+3 4 0
+-3 4 0
