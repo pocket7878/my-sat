@@ -12,7 +12,9 @@ import qualified Debug.Trace as D
 
 data TruthValue = No | Unknown | Yes deriving (Show, Eq, Ord)
 
-type Assignment = M.Map Var TruthValue
+type Level = Int
+
+type Assignment = M.Map Var (TruthValue, Level)
 
 data Solving = Solving {
              _binds :: Assignment
@@ -42,13 +44,13 @@ getSign (Not _) = No
 -}
 
 evalLiteral :: Literal -> Assignment -> TruthValue
-evalLiteral (Normal v) as = as M.! v
+evalLiteral (Normal v) as = fst $ as M.! v
 evalLiteral (Not v) as
   | assign == Unknown = Unknown
   | assign == Yes = No
   | assign == No = Yes
   where
-    assign = as M.! v
+    assign = fst $ as M.! v
 
 evalClause :: Clause -> Assignment -> TruthValue
 evalClause EmptyClause _  = No
@@ -77,9 +79,9 @@ isUnitClause (Clause ls) as = findUnitLiteral evalResults Nothing
     evalResults = L.map (\l -> (l, (evalLiteral l as))) ls
 
 
-propagate :: Solving -> Solving
-propagate s = case unitClause of
-                Just c -> if evalResults /= No then propagate (newSolving s c) else s
+propagate :: Solving -> Level -> Solving
+propagate s dl = case unitClause of
+                Just c -> if evalResults /= No then propagate (newSolving s c) dl else s
                 Nothing -> s
   where
     cs = getClause $ _solving_cnf s
@@ -90,7 +92,7 @@ propagate s = case unitClause of
     unitLiteral :: Clause -> Assignment -> Literal
     unitLiteral (Clause ls) as = head $ filter (\l -> (evalLiteral l as) == Unknown) ls
     newSolving :: Solving -> Clause -> Solving
-    newSolving s c = s {_binds = (M.insert (getVar (unitLiteral c (_binds s))) (getSign (unitLiteral c (_binds s))) (_binds s)) }
+    newSolving s c = s {_binds = (M.insert (getVar (unitLiteral c (_binds s))) ((getSign (unitLiteral c (_binds s))), dl) (_binds s)) }
   
 
 {-
@@ -188,8 +190,8 @@ containsEmptyClause :: CNF -> Bool
 containsEmptyClause (CNF cs) = any (\c -> c == EmptyClause) cs
 
 dprint :: (Show a) => String -> a -> a
-dprint msg x = D.trace (msg ++ (show x)) x
---dprint msg x = x
+--dprint msg x = D.trace (msg ++ (show x)) x
+dprint msg x = x
 
 data Results = Sat Solving | Unsat deriving(Show)
 
@@ -197,8 +199,8 @@ asBoolean :: Results -> Bool
 asBoolean (Sat _) = True
 asBoolean Unsat = False
 
-satisfiable' :: Solving -> Results
-satisfiable' s
+satisfiable' :: Solving -> Level -> Results
+satisfiable' s dl
   | results == Yes = Sat cleanuped
   | results == No = Unsat 
   | asBoolean trueResults = trueResults
@@ -206,18 +208,18 @@ satisfiable' s
   | otherwise = Unsat
   where
     cleanuped :: Solving
-    cleanuped = dprint "cleanuped: " $ propagate s
+    cleanuped = dprint "cleanuped: " $ propagate s dl
     results = evalSolving cleanuped
-    unknownvars = M.filter (\x -> x == Unknown) (_binds cleanuped)
+    unknownvars = M.filter (\x -> fst x == Unknown) (_binds cleanuped)
     unknownvar = head $ M.keys unknownvars
-    trueBranch = dprint "trueBranch: " $ cleanuped {_binds = (M.insert unknownvar Yes (_binds cleanuped))}
-    trueResults = satisfiable' trueBranch
-    falseBranch = dprint "falseBranch :" $ cleanuped {_binds = (M.insert unknownvar No (_binds cleanuped))}
-    falseResults = satisfiable' falseBranch
+    trueBranch = dprint "trueBranch: " $ cleanuped {_binds = (M.insert unknownvar (Yes, dl) (_binds cleanuped))}
+    trueResults = satisfiable' trueBranch (dl + 1)
+    falseBranch = dprint "falseBranch :" $ cleanuped {_binds = (M.insert unknownvar (No, dl) (_binds cleanuped))}
+    falseResults = satisfiable' falseBranch (dl + 1)
 
 satisfiable :: DIMACS -> Results
 satisfiable dimacs = results
   where
     cnf = _cnf dimacs
-    defaultBinds = M.fromList $ [(x, Unknown) | x <- [1..(_variableCount dimacs)]]
-    results = satisfiable' (Solving {_binds = defaultBinds, _solving_cnf = cnf})
+    defaultBinds = M.fromList $ [(x, (Unknown, 0)) | x <- [1..(_variableCount dimacs)]]
+    results = satisfiable' (Solving {_binds = defaultBinds, _solving_cnf = cnf}) 0
