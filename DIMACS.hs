@@ -1,7 +1,6 @@
 module DIMACS where
 
-type VarId = Int
-data Var = Var VarId deriving (Show, Eq, Ord)
+type Var = Int
 
 data Literal = Not Var | Normal Var deriving (Show, Eq)
 

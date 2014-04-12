@@ -10,7 +10,7 @@ import qualified Debug.Trace as D
 -}
 
 data Solving = Solving {
-             _binds :: M.Map VarId Bool
+             _binds :: M.Map Var Bool
              ,_solving_cnf :: CNF
              } deriving (Show)
 
@@ -65,8 +65,8 @@ removeUnitClause s l = s { _solving_cnf = newCNF, _binds = newBinds}
     newCNF :: CNF
     newCNF = CNF (removeInverseClauseLiteral (restClause (getClause (_solving_cnf s)) l) l)
     newBinds = case l of
-                 (Normal (Var i)) -> M.insert i True (_binds s)
-                 (Not (Var i)) -> M.insert i False (_binds s)
+                 (Normal i) -> M.insert i True (_binds s)
+                 (Not i) -> M.insert i False (_binds s)
 
 removeAllUnitClause :: Solving -> Solving
 removeAllUnitClause s = if existsUnitClause then removeAllUnitClause updatedCNF else s
@@ -114,10 +114,10 @@ removeAllPureLiteralClause s = if null allPureLiteral then s else s {_solving_cn
     allPureLiteral :: [Literal]
     allPureLiteral = L.nub $ collectAllPureLiteral literals
     newClause = L.foldl' removeLiteralClause cs allPureLiteral
-    newBinds :: M.Map VarId Bool
+    newBinds :: M.Map Var Bool
     newBinds = L.foldl' (\b l -> case l of
-                                (Normal (Var i)) -> M.insert i True b 
-                                (Not (Var i)) -> M.insert i False b) (_binds s) allPureLiteral
+                                (Normal i) -> M.insert i True b 
+                                (Not i) -> M.insert i False b) (_binds s) allPureLiteral
 
 {-
 - クリーンアップ規則
@@ -142,7 +142,7 @@ cleanupRule s = s {_solving_cnf = newCNF}
 -}
 --L (Var x)をふくむ節を削除し、残りの節からもinverse Lを削除する
 bindAsTrue :: Solving -> Var -> Solving
-bindAsTrue s v@(Var i) = s {_solving_cnf = newCNF, _binds = newBinds}
+bindAsTrue s v = s {_solving_cnf = newCNF, _binds = newBinds}
   where
     cs = getClause (_solving_cnf s)
     restClause :: [Clause]
@@ -152,11 +152,11 @@ bindAsTrue s v@(Var i) = s {_solving_cnf = newCNF, _binds = newBinds}
                                 _ -> True) cs
     newCNF :: CNF
     newCNF = CNF $ removeInverseClauseLiteral restClause (Normal v)
-    newBinds = M.insert i True (_binds s)
+    newBinds = M.insert v True (_binds s)
 
 --inverse L(Var x)をふくむ節を削除し、残りの節からもLを削除する
 bindAsFalse :: Solving -> Var -> Solving
-bindAsFalse s v@(Var i) = s {_solving_cnf = newCNF, _binds = newBinds}
+bindAsFalse s v = s {_solving_cnf = newCNF, _binds = newBinds}
   where
     cs = getClause (_solving_cnf s)
     restClause :: [Clause]
@@ -165,7 +165,7 @@ bindAsFalse s v@(Var i) = s {_solving_cnf = newCNF, _binds = newBinds}
                                 (Clause ls) -> not ((Not v) `elem` ls)
                                 _ -> True) cs
     newCNF = CNF $ (removeInverseClauseLiteral restClause (Not v))
-    newBinds = M.insert i False (_binds s)
+    newBinds = M.insert v False (_binds s)
 
 {-
 - 充足可能性

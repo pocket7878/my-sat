@@ -17,13 +17,13 @@ parseNotLiteral :: Parser Literal
 parseNotLiteral = do {
                      char '-';
                      n <- natural;
-                     return (Not (Var n));
+                     return (Not n);
                      }
 
 parseNormalLiteral :: Parser Literal
 parseNormalLiteral = do {
                         n <- natural;
-                        return (Normal (Var n));
+                        return (Normal n);
                         }
 
 parseLiteral :: Parser Literal
