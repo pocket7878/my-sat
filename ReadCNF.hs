@@ -48,14 +48,13 @@ parseLiterals = do {
                           return [];
                           }
 
-parseClause :: Parser　Clause
+parseClause :: Parser Clause
 parseClause = do {
                  spaces;
                  ls <-parseLiterals;
                  newline;
                  case (length ls) of
                    0 -> return EmptyClause
-                   1 -> return $ UnitClause (head ls)
                    _ -> return $ Clause ls
                    }
 

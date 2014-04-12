@@ -4,7 +4,7 @@ type Var = Int
 
 data Literal = Not Var | Normal Var deriving (Show, Eq)
 
-data Clause = EmptyClause | Clause [Literal] | UnitClause Literal deriving (Show, Eq)
+data Clause = EmptyClause | Clause [Literal] deriving (Show, Eq)
 
 data CNF = CNF [Clause] deriving (Show)
 
