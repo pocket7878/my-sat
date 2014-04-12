@@ -9,8 +9,13 @@ import qualified Debug.Trace as D
 - Data Structure
 -}
 
+
+data TruthValue = Yes | Unknown | No deriving (Show, Eq, Ord)
+
+type Assignment = M.Map Var TruthValue
+
 data Solving = Solving {
-             _binds :: M.Map Var Bool
+             _binds :: Assignment
              ,_solving_cnf :: CNF
              } deriving (Show)
 
@@ -23,6 +28,29 @@ getClause (CNF cs) = cs
 inverse :: Literal -> Literal
 inverse (Normal v) = (Not v)
 inverse (Not v) = (Normal v)
+
+{-
+- Evaluate Function
+-}
+
+evalLiteral :: Literal -> Assignment -> TruthValue
+evalLiteral (Normal v) as = as M.! v
+evalLiteral (Not v) as
+  | assign == Unknown = Unknown
+  | assign == Yes = No
+  | assign == No = Yes
+  where
+    assign = as M.! v
+
+evalClause :: Clause -> Assignment -> TruthValue
+evalClause EmptyClause _  = No
+evalClause (UnitClause l) as = maximum [No, (evalLiteral l as)]
+evalClause (Clause ls) as = maximum (No : L.map (\l -> evalLiteral l as) ls)
+
+evalSolving :: Solving -> TruthValue
+evalSolving s = maximum (Yes : L.map (\c -> evalClause c (_binds s)) clauses)
+  where
+    clauses = getClause $ _solving_cnf s
 
 {-
 - one Literal Rule
@@ -65,8 +93,8 @@ removeUnitClause s l = s { _solving_cnf = newCNF, _binds = newBinds}
     newCNF :: CNF
     newCNF = CNF (removeInverseClauseLiteral (restClause (getClause (_solving_cnf s)) l) l)
     newBinds = case l of
-                 (Normal i) -> M.insert i True (_binds s)
-                 (Not i) -> M.insert i False (_binds s)
+                 (Normal i) -> M.insert i Yes (_binds s)
+                 (Not i) -> M.insert i No (_binds s)
 
 removeAllUnitClause :: Solving -> Solving
 removeAllUnitClause s = if existsUnitClause then removeAllUnitClause updatedCNF else s
@@ -114,10 +142,10 @@ removeAllPureLiteralClause s = if null allPureLiteral then s else s {_solving_cn
     allPureLiteral :: [Literal]
     allPureLiteral = L.nub $ collectAllPureLiteral literals
     newClause = L.foldl' removeLiteralClause cs allPureLiteral
-    newBinds :: M.Map Var Bool
+    newBinds :: Assignment
     newBinds = L.foldl' (\b l -> case l of
-                                (Normal i) -> M.insert i True b 
-                                (Not i) -> M.insert i False b) (_binds s) allPureLiteral
+                                (Normal i) -> M.insert i Yes b 
+                                (Not i) -> M.insert i No b) (_binds s) allPureLiteral
 
 {-
 - クリーンアップ規則
@@ -152,7 +180,7 @@ bindAsTrue s v = s {_solving_cnf = newCNF, _binds = newBinds}
                                 _ -> True) cs
     newCNF :: CNF
     newCNF = CNF $ removeInverseClauseLiteral restClause (Normal v)
-    newBinds = M.insert v True (_binds s)
+    newBinds = M.insert v Yes (_binds s)
 
 --inverse L(Var x)をふくむ節を削除し、残りの節からもLを削除する
 bindAsFalse :: Solving -> Var -> Solving
@@ -165,7 +193,7 @@ bindAsFalse s v = s {_solving_cnf = newCNF, _binds = newBinds}
                                 (Clause ls) -> not ((Not v) `elem` ls)
                                 _ -> True) cs
     newCNF = CNF $ (removeInverseClauseLiteral restClause (Not v))
-    newBinds = M.insert v False (_binds s)
+    newBinds = M.insert v No (_binds s)
 
 {-
 - 充足可能性
@@ -181,19 +209,19 @@ dprint :: (Show a) => String -> a -> a
 --dprint msg x = D.trace (msg ++ (show x)) x
 dprint msg x = x
 
-data Results = Yes Solving | No deriving(Show)
+data Results = Sat Solving | Unsat deriving(Show)
 
 asBoolean :: Results -> Bool
-asBoolean (Yes _) = True
-asBoolean No = False
+asBoolean (Sat _) = True
+asBoolean Unsat = False
 
 satisfiable' :: Solving -> Results
 satisfiable' s
-    | emptyCNF (_solving_cnf cleanuped) = Yes cleanuped
-    | containsEmptyClause (_solving_cnf cleanuped) = No
+    | emptyCNF (_solving_cnf cleanuped) = Sat cleanuped
+    | containsEmptyClause (_solving_cnf cleanuped) = Unsat
     | asBoolean trueResults = trueResults
     | asBoolean falseResults = falseResults
-    | otherwise = No
+    | otherwise = Unsat
   where
     getVar :: Literal -> Var
     getVar (Normal v) = v
