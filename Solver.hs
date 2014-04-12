@@ -14,7 +14,13 @@ data TruthValue = No | Unknown | Yes deriving (Show, Eq, Ord)
 
 type Level = Int
 
-type Assignment = M.Map Var (TruthValue, Level)
+type DecisionFlag = Bool
+data Assign = Assign {
+            _truthValue :: TruthValue
+            ,_level :: Level
+            ,_deicision :: DecisionFlag
+            } deriving (Show, Eq)
+type Assignment = M.Map Var Assign
 
 data Solving = Solving {
              _binds :: Assignment
@@ -44,13 +50,13 @@ getSign (Not _) = No
 -}
 
 evalLiteral :: Literal -> Assignment -> TruthValue
-evalLiteral (Normal v) as = fst $ as M.! v
+evalLiteral (Normal v) as = _truthValue $ as M.! v
 evalLiteral (Not v) as
   | assign == Unknown = Unknown
   | assign == Yes = No
   | assign == No = Yes
   where
-    assign = fst $ as M.! v
+    assign = _truthValue $ as M.! v
 
 evalClause :: Clause -> Assignment -> TruthValue
 evalClause EmptyClause _  = No
@@ -92,7 +98,9 @@ propagate s dl = case unitClause of
     unitLiteral :: Clause -> Assignment -> Literal
     unitLiteral (Clause ls) as = head $ filter (\l -> (evalLiteral l as) == Unknown) ls
     newSolving :: Solving -> Clause -> Solving
-    newSolving s c = s {_binds = (M.insert (getVar (unitLiteral c (_binds s))) ((getSign (unitLiteral c (_binds s))), dl) (_binds s)) }
+    newSolving s c = s {_binds = (M.insert (getVar (unitLiteral c (_binds s))) 
+                                           (Assign (getSign (unitLiteral c (_binds s))) dl False)
+                                           (_binds s)) }
   
 
 {-
@@ -210,16 +218,16 @@ satisfiable' s dl
     cleanuped :: Solving
     cleanuped = dprint "cleanuped: " $ propagate s dl
     results = evalSolving cleanuped
-    unknownvars = M.filter (\x -> fst x == Unknown) (_binds cleanuped)
+    unknownvars = M.filter (\x -> _truthValue x == Unknown) (_binds cleanuped)
     unknownvar = head $ M.keys unknownvars
-    trueBranch = dprint "trueBranch: " $ cleanuped {_binds = (M.insert unknownvar (Yes, dl) (_binds cleanuped))}
+    trueBranch = dprint "trueBranch: " $ cleanuped {_binds = (M.insert unknownvar (Assign Yes dl True) (_binds cleanuped))}
     trueResults = satisfiable' trueBranch (dl + 1)
-    falseBranch = dprint "falseBranch :" $ cleanuped {_binds = (M.insert unknownvar (No, dl) (_binds cleanuped))}
+    falseBranch = dprint "falseBranch :" $ cleanuped {_binds = (M.insert unknownvar (Assign No dl True) (_binds cleanuped))}
     falseResults = satisfiable' falseBranch (dl + 1)
 
 satisfiable :: DIMACS -> Results
 satisfiable dimacs = results
   where
     cnf = _cnf dimacs
-    defaultBinds = M.fromList $ [(x, (Unknown, 0)) | x <- [1..(_variableCount dimacs)]]
+    defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False)) | x <- [1..(_variableCount dimacs)]]
     results = satisfiable' (Solving {_binds = defaultBinds, _solving_cnf = cnf}) 0
