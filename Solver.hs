@@ -1,9 +1,11 @@
 module Solver where
 
 import qualified Data.Map as M
+import qualified Data.Maybe as Maybe
 import qualified Data.List as L
 import DIMACS
 import qualified Debug.Trace as D
+import qualified DAG as G
 
 {-
 - Data Structure
@@ -15,23 +17,35 @@ data TruthValue = No | Unknown | Yes deriving (Show, Eq, Ord)
 type Level = Int
 
 type DecisionFlag = Bool
+
 data Assign = Assign {
             _truthValue :: TruthValue
             ,_level :: Level
             ,_deicision :: DecisionFlag
-            } deriving (Show, Eq)
+            } deriving (Show, Eq, Ord)
+
 type Assignment = M.Map Var Assign
 
+type ImplicationGraph = G.Graph (Var, Assign) 
+
 data Solving = Solving {
-             _binds :: Assignment
+             _implication_graph :: ImplicationGraph
+             ,_binds :: Assignment
              ,_solving_cnf :: CNF
              } deriving (Show)
 
 {-
 - Utility functions
 -}
+strRepeat :: Int -> String -> String
+strRepeat 0 _ = ""
+strRepeat n str = str ++ (strRepeat (n - 1) str)
+
 getClause :: CNF -> [Clause]
 getClause (CNF cs) = cs
+
+getLiterals :: Clause -> [Literal]
+getLiterals (Clause ls) = ls
 
 inverse :: Literal -> Literal
 inverse (Normal v) = (Not v)
@@ -59,7 +73,6 @@ evalLiteral (Not v) as
     assign = _truthValue $ as M.! v
 
 evalClause :: Clause -> Assignment -> TruthValue
-evalClause EmptyClause _  = No
 evalClause (Clause ls) as = maximum (No : L.map (\l -> evalLiteral l as) ls)
 
 evalSolving :: Solving -> TruthValue
@@ -79,29 +92,56 @@ findUnitLiteral ((_, No):ls) tmp = findUnitLiteral ls tmp
 
 --単位節かどうか
 isUnitClause :: Clause -> Assignment -> Maybe Literal
-isUnitClause EmptyClause _ = Nothing
 isUnitClause (Clause ls) as = findUnitLiteral evalResults Nothing
   where
     evalResults = L.map (\l -> (l, (evalLiteral l as))) ls
 
 
-propagate :: Solving -> Level -> Solving
-propagate s dl = case unitClause of
-                Just c -> if evalResults /= No then propagate (newSolving s c) dl else s
-                Nothing -> s
+data PropagateResults = Success Solving | Conflict Solving Var
+
+propagate :: Solving -> Level -> PropagateResults
+propagate s dl = if null allUnitClauseData then
+                   Success s
+                 else
+                   if null conflictClauseData then
+                     propagate (updateSolving s allUnitClauseData) dl
+                   else
+                     Conflict (updateSolving s conflictClauseData) $ getVar (Maybe.fromJust conflictLiteral)
+                     
   where
-    cs = getClause $ _solving_cnf s
-    evalResults = evalSolving s
-    unitClause = L.find (\c -> case isUnitClause c (_binds s) of
-                                 Just s -> True
-                                 Nothing -> False) cs
-    unitLiteral :: Clause -> Assignment -> Literal
-    unitLiteral (Clause ls) as = head $ filter (\l -> (evalLiteral l as) == Unknown) ls
-    newSolving :: Solving -> Clause -> Solving
-    newSolving s c = s {_binds = (M.insert (getVar (unitLiteral c (_binds s))) 
-                                           (Assign (getSign (unitLiteral c (_binds s))) dl False)
-                                           (_binds s)) }
-  
+    --全ての節
+    allClause = getClause $ _solving_cnf s
+    --単位リテラルとその節に含まれる残りの変数のリストのペアを集めたもの
+    allUnitClauseData :: [(Literal, [Var])]
+    allUnitClauseData = Maybe.catMaybes $ L.map (\c -> case isUnitClause c (_binds s) of
+                                                        Just l -> Just (l, L.map (\ll -> (getVar ll)) 
+                                                                            (L.filter (\ll -> ll /= l) (getLiterals c)))
+                                                        Nothing -> Nothing) allClause
+    --単位リテラルリスト
+    unitLiterals = L.map fst allUnitClauseData
+    --その単位リテラル中でコンフリクトしているものを一つ取り出す
+    --allUnitClauseDataの中で、自分とinverseのリテラルを含むものがallUnitClauseDataのなかに入っているもの
+    conflictLiteral :: Maybe Literal
+    conflictLiteral = L.find (\l -> (any (\ll -> ll == (inverse l)) unitLiterals)) unitLiterals
+    --そのようなリテラルのデータペアを取り出す
+    conflictClauseData :: [(Literal, [Var])]
+    conflictClauseData = case conflictLiteral of
+                           Just l -> L.filter (\(ul, c) -> ul == l || ul == (inverse l)) allUnitClauseData
+                           Nothing -> []
+    --グラフにリテラルと変数のペアのエッジを追加する
+    updateGraph :: ImplicationGraph -> Literal  -> [Var] -> Assignment -> ImplicationGraph
+    updateGraph g l vs as = L.foldl' (\g from -> G.connect g
+                                                           (G.Vertex  (from, (as M.! from)))
+                                                           (G.Vertex  ((getVar l), (Assign (getSign l) dl False))))
+                                (G.addVertex g (G.Vertex ((getVar l), (Assign (getSign l) dl False)))) vs
+    --Solverを更新
+    updateSolving :: Solving -> [(Literal, [Var])] -> Solving
+    updateSolving s ds = s {_binds = newBinds, _implication_graph = newGraph}
+      where
+        newBinds = L.foldl' (\b l -> dprint ((strRepeat (dl * 3) " ") ++ "Bind " ++ (show (getVar l)) ++ " to :" ++ (show (getSign l))) $
+                                      M.insert (getVar l) (Assign (getSign l) dl False) b) (_binds s) $ L.map fst ds
+        newGraph = L.foldl' (\g (l, vs) -> updateGraph g l vs newBinds) (_implication_graph s) ds
+    
 
 {-
 - Pure literal rule
@@ -194,12 +234,9 @@ emptyCNF :: CNF -> Bool
 emptyCNF (CNF []) = True
 emptyCNF _ = False
 
-containsEmptyClause :: CNF -> Bool
-containsEmptyClause (CNF cs) = any (\c -> c == EmptyClause) cs
-
 dprint :: (Show a) => String -> a -> a
---dprint msg x = D.trace (msg ++ (show x)) x
-dprint msg x = x
+dprint msg x = D.trace msg x
+--dprint msg x = x
 
 data Results = Sat Solving | Unsat deriving(Show)
 
@@ -210,19 +247,34 @@ asBoolean Unsat = False
 satisfiable' :: Solving -> Level -> Results
 satisfiable' s dl
   | results == Yes = Sat cleanuped
-  | results == No = Unsat 
+  | results == No = if dl == 0 then Unsat else dprint ("ContradictionReason: " ++ (show (getContradictionReason propagated)) 
+                                                       ++ " and Graph: \n" ++ (show (_implication_graph cleanuped))) Unsat
   | asBoolean trueResults = trueResults
   | asBoolean falseResults = falseResults
   | otherwise = Unsat
   where
+    propagated :: PropagateResults
+    propagated = propagate s dl
     cleanuped :: Solving
-    cleanuped = dprint "cleanuped: " $ propagate s dl
-    results = evalSolving cleanuped
+    cleanuped = getSolving propagated
+    getContradictionReason :: PropagateResults -> Var
+    getContradictionReason (Success s) = error "Not in contradiction"
+    getContradictionReason (Conflict s v) = v
+    getSolving :: PropagateResults -> Solving
+    getSolving (Success s) = s
+    getSolving (Conflict s v) = s
+    results = case propagated of
+                Success s -> evalSolving s
+                Conflict s v -> No
     unknownvars = M.filter (\x -> _truthValue x == Unknown) (_binds cleanuped)
     unknownvar = head $ M.keys unknownvars
-    trueBranch = dprint "trueBranch: " $ cleanuped {_binds = (M.insert unknownvar (Assign Yes dl True) (_binds cleanuped))}
+    trueBranch = dprint ((strRepeat (dl * 3) " ") ++ "trueBranch: " ++ (show unknownvar)) 
+                      $ cleanuped {_binds = (M.insert unknownvar (Assign Yes dl True) (_binds cleanuped))
+                                  ,_implication_graph = (G.addVertex (_implication_graph cleanuped)
+                                  (G.Vertex (unknownvar, (Assign Yes dl True))))}
     trueResults = satisfiable' trueBranch (dl + 1)
-    falseBranch = dprint "falseBranch :" $ cleanuped {_binds = (M.insert unknownvar (Assign No dl True) (_binds cleanuped))}
+    falseBranch = dprint ((strRepeat (dl * 3) " ") ++ "falseBranch: " ++ (show unknownvar)) 
+                    $ cleanuped {_binds = (M.insert unknownvar (Assign No dl True) (_binds cleanuped))}
     falseResults = satisfiable' falseBranch (dl + 1)
 
 satisfiable :: DIMACS -> Results
@@ -230,4 +282,6 @@ satisfiable dimacs = results
   where
     cnf = _cnf dimacs
     defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False)) | x <- [1..(_variableCount dimacs)]]
-    results = satisfiable' (Solving {_binds = defaultBinds, _solving_cnf = cnf}) 0
+    results = satisfiable' (Solving {_binds = defaultBinds
+                                    ,_solving_cnf = cnf
+                                    ,_implication_graph = G.empty}) 0
