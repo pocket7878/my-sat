@@ -26,6 +26,7 @@ data Assign = Assign {
             _truthValue :: TruthValue
             ,_level :: Level
             ,_decision :: DecisionFlag
+            ,_priority :: Int
             } deriving (Show, Eq, Ord)
 
 type Assignment = M.Map Var Assign
@@ -456,7 +457,9 @@ satisfiable :: DIMACS -> Results
 satisfiable dimacs = results
   where
     cnf = _cnf dimacs
-    defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False)) | x <- [1..(_variableCount dimacs)]]
+    --全ての変数の書記わりあて、全ての変数は最初は未確定の非決定変数の優先
+    --優先度0になっている
+    defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False 0)) | x <- [1..(_variableCount dimacs)]]
     results = satisfiable' (Solving {_binds = defaultBinds
                                     ,_solving_cnf = cnf
                                     ,_implication_graph = emptyImplicationGraph}) 0 (undefined, undefined)
