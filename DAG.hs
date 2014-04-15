@@ -19,3 +19,9 @@ addEdge (Graph vs es) e = Graph vs (S.insert e es)
 
 connect :: (Ord a) => Graph a -> Vertex a -> Vertex a -> Graph a
 connect g from to = addEdge g (Edge from to)
+
+--ある条件を満たす頂点と、そのような頂点のみを両端とする辺のみ残したグラフを返す
+filter :: (Ord a) => Graph a -> (Vertex a -> Bool) -> Graph a
+filter (Graph vs es) f = Graph (S.filter f vs) (S.filter (\(Edge from to) -> f from && f to) es)
+
+

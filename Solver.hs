@@ -6,6 +6,10 @@ import qualified Data.List as L
 import DIMACS
 import qualified Debug.Trace as D
 import qualified DAG as G
+import qualified Data.Graph.Inductive.Graph as FGL
+import qualified Data.Graph.Inductive.Query.Dominators as FDM
+import qualified Data.Graph.Inductive.Tree as FT
+import qualified Data.Map as M
 
 {-
 - Data Structure
@@ -21,12 +25,143 @@ type DecisionFlag = Bool
 data Assign = Assign {
             _truthValue :: TruthValue
             ,_level :: Level
-            ,_deicision :: DecisionFlag
+            ,_decision :: DecisionFlag
             } deriving (Show, Eq, Ord)
 
 type Assignment = M.Map Var Assign
 
-type ImplicationGraph = G.Graph (Var, Assign) 
+
+data ImplicationGraph = ImpGraph {
+                                 _graph :: FT.Gr (Var, Assign) Int
+                                 ,_node_table :: M.Map (Var, Assign) Int
+                                 ,_edge_table :: M.Map (Int, Int) Int
+                                 ,_node_counter :: Int
+                                 ,_edge_counter :: Int
+                                 } deriving (Show)
+
+emptyImplicationGraph :: ImplicationGraph
+emptyImplicationGraph = ImpGraph FGL.empty M.empty M.empty 0 0
+
+--ノードの重複は許さない,IDは自動的に割り振る
+addNode :: ImplicationGraph -> (Var, Assign) -> ImplicationGraph
+addNode g n = if (M.member n (_node_table g)) then
+                g
+              else
+                g {_node_counter = newCounter, _node_table = newNodeTable, _graph = newGraph} 
+  where
+    newCounter = 1 + (_node_counter g)
+    newNodeTable = M.insert n newCounter (_node_table g)
+    newGraph = FGL.insNode (newCounter, n) (_graph g) 
+
+--辺の重複は許さない
+connect :: ImplicationGraph -> (Var, Assign) -> (Var, Assign) -> ImplicationGraph
+connect g f t = if (M.member f (_node_table g)) && (M.member t (_node_table g)) && (not (M.member (fId, tId) (_edge_table g))) then
+                  g {_edge_counter = eId, _edge_table = newEdgeTable, _graph = newGraph}
+                else 
+                  g
+  where
+    fId = (_node_table g) M.! f
+    tId = (_node_table g) M.! t
+    eId = 1 + (_edge_counter g)
+    newEdgeTable = M.insert (fId, tId) eId (_edge_table g)
+    newGraph = FGL.insEdge (fId, tId, eId) (_graph g)
+
+--First UIPを見つける
+----そのレベルの決定変数
+type RootDecisionVar = (Var, Assign)
+type ConflictVar = Var
+type UIP = (Var, Assign)
+firstUIP :: ImplicationGraph -> RootDecisionVar -> ConflictVar -> FGL.Node
+firstUIP g r c = head uipNodes
+  where
+    rootId :: FGL.Node
+    rootId = (_node_table g) M.! r
+    conflictId :: [FGL.Node]
+    conflictId = dprint ("ConflictIds: " ++ (show $ L.map (\(c,_) -> (_node_table g) M.! c) $ M.toList $ M.filterWithKey (\(k, _) _ -> k == c) (_node_table g))) $
+                        L.map (\(c,_) -> (_node_table g) M.! c) $ M.toList $ M.filterWithKey (\(k, _) _ -> k == c) (_node_table g)
+    dominators :: [[FGL.Node]]
+    dominators = dprint ("Dominators: " ++ (show $ L.map (\(_, ns) -> tail ns) $ L.filter (\(n, _) -> n `elem` conflictId) $ FDM.dom (_graph g) rootId)) $
+                        L.map (\(_, ns) -> tail ns) $ L.filter (\(n, _) -> n `elem` conflictId) $ FDM.dom (_graph g) rootId
+    uipNodes :: [FGL.Node]
+    uipNodes = dprint ("UIPNodes is: " ++ show (L.foldl1' (\acc l -> acc `L.intersect` l) dominators)) $ 
+                  L.foldl1' (\acc l -> acc `L.intersect` l) dominators
+
+--学習節を求めるための作業をする
+{-
+- 方法はシンプルに、矛盾している節全ての「理由」を「融合」する。
+- 理由は、以下のように求める、
+- 含意グラフ上で、自分を指し示しているノードの理由を融合する
+- ただし、理由を調べたいノードがFirst UIPならば理由はFirst UIPに割り当てら
+- 真理値の反対とする。
+- また、理由を調べたいノードが決定変数ならば、同様に割り当てられた真理値の
+- 反対とする。
+-
+- 融合は、以下のように定義する。
+- ある２つの節についての融合とは、その節に含まれる、inverseも含めた同値な節
+- を削ったものをあらたな節のリテラルとしたものとする
+-}
+
+--融合
+resolutionClause :: Clause -> Clause -> Clause 
+resolutionClause (Clause ls1) (Clause ls2) = Clause $ resolutionLiterals ls1 ls2
+  where
+    resolutionLiterals :: [Literal] -> [Literal] -> [Literal]
+    resolutionLiterals ls1 ls2 = L.nubBy (\a b -> a == b || (inverse a) == b) $ (ls1 ++ ls2)
+
+causeOf :: ImplicationGraph -> FGL.Node -> FGL.Node -> Clause
+causeOf g targetNode uipNode
+  |targetNode == uipNode || (_decision $ snd targetAssign) || null preNode = let as = targetAssign in
+                                                                                if (_truthValue $ snd as) == Yes then 
+                                                                                  (Clause [(Not (fst as))])
+                                                                                else
+                                                                                  (Clause [(Normal (fst as))])
+  |otherwise = L.foldl1' (\cold cnew -> (resolutionClause cold cnew))
+                  $ L.map (\n -> causeOf g n uipNode) preNode
+
+  where
+    getAssign :: ImplicationGraph -> FGL.Node -> (Var, Assign)
+    getAssign g n = Maybe.fromJust $ FGL.lab (_graph g) n
+    targetAssign :: (Var, Assign)
+    targetAssign = getAssign g targetNode
+    preNode = FGL.pre (_graph g) targetNode
+
+
+getLearningClause :: ImplicationGraph -> ConflictVar -> FGL.Node -> Clause
+getLearningClause g c uip = L.foldl1' (\cold cnew -> (resolutionClause cold cnew))  $
+                              L.map (\cnode -> causeOf g cnode uip) conflictId
+  where
+    conflictId :: [FGL.Node]
+    conflictId = L.map (\(c,_) -> (_node_table g) M.! c) $ M.toList $ M.filterWithKey (\(k, _) _ -> k == c) (_node_table g)
+
+--グラフからあるレベル以上のノードと辺を削除する
+cleanupGraph :: ImplicationGraph -> Level -> ImplicationGraph
+cleanupGraph g l = g {_graph = newGraph
+                     ,_node_table = newNodeTable
+                     ,_edge_table = newEdgeTable
+                     ,_node_counter = newNodeCounter
+                     ,_edge_counter = newEdgeCounter
+                     }
+  where
+    (newNodeTable, matchNodeTable) = M.partitionWithKey (\(_, k) _ -> (_level k) <= l) (_node_table g)
+    matchNodes :: [FGL.Node]
+    matchNodes = L.map snd $ M.toList matchNodeTable
+    (matchEdgeTable, newEdgeTable) = M.partitionWithKey (\(f, t) _ -> (f `elem` matchNodes) || (t `elem` matchNodes)) (_edge_table g)
+    matchEdges :: [FGL.Edge]
+    matchEdges = L.map fst $ M.toList matchEdgeTable
+    newNodeCounter = (_node_counter g) - (length matchNodes)
+    newEdgeCounter = (_edge_counter g) - (length matchEdges)
+    newGraph = FGL.delEdges matchEdges $ FGL.delNodes matchNodes (_graph g)
+
+--バインドからあるレベル以上のバインドを削る
+cleanupBind :: Assignment -> Level -> Assignment
+cleanupBind a l = M.map (\as -> if (_level as) > l then as {_truthValue = Unknown, _decision = False} else as) a
+
+--Solvingからあるレベル以上の値を消す
+cleanupSolving :: Solving -> Level -> Solving
+cleanupSolving s l = s {_implication_graph = cleanupGraph (_implication_graph s) l
+                       ,_binds = cleanupBind (_binds s) l
+                       }
+
 
 data Solving = Solving {
              _implication_graph :: ImplicationGraph
@@ -43,6 +178,9 @@ strRepeat n str = str ++ (strRepeat (n - 1) str)
 
 getClause :: CNF -> [Clause]
 getClause (CNF cs) = cs
+
+addClause :: CNF -> Clause -> CNF
+addClause (CNF cs) c = (CNF (c : cs))
 
 getLiterals :: Clause -> [Literal]
 getLiterals (Clause ls) = ls
@@ -97,14 +235,14 @@ isUnitClause (Clause ls) as = findUnitLiteral evalResults Nothing
     evalResults = L.map (\l -> (l, (evalLiteral l as))) ls
 
 
-data PropagateResults = Success Solving | Conflict Solving Var
+data PropagateResults = Success Solving | Conflict Solving Var deriving (Show)
 
 propagate :: Solving -> Level -> PropagateResults
 propagate s dl = if null allUnitClauseData then
                    Success s
                  else
                    if null conflictClauseData then
-                     propagate (updateSolving s allUnitClauseData) dl
+                     propagate (updateSolving s normalClauseData) dl
                    else
                      Conflict (updateSolving s conflictClauseData) $ getVar (Maybe.fromJust conflictLiteral)
                      
@@ -128,12 +266,16 @@ propagate s dl = if null allUnitClauseData then
     conflictClauseData = case conflictLiteral of
                            Just l -> L.filter (\(ul, c) -> ul == l || ul == (inverse l)) allUnitClauseData
                            Nothing -> []
+    --先頭のリテラルと、そのリテラルを含むデータ
+    normalClauseData :: [(Literal, [Var])]
+    normalClauseData = L.filter (\(l, v) -> l == lit) allUnitClauseData
+      where
+        lit = fst $ head allUnitClauseData
     --グラフにリテラルと変数のペアのエッジを追加する
     updateGraph :: ImplicationGraph -> Literal  -> [Var] -> Assignment -> ImplicationGraph
-    updateGraph g l vs as = L.foldl' (\g from -> G.connect g
-                                                           (G.Vertex  (from, (as M.! from)))
-                                                           (G.Vertex  ((getVar l), (Assign (getSign l) dl False))))
-                                (G.addVertex g (G.Vertex ((getVar l), (Assign (getSign l) dl False)))) vs
+    updateGraph g l vs as = L.foldl' (\g from -> connect g (from, (as M.! from))
+                                                           ((getVar l), (Assign (getSign l) dl False)))
+                                (addNode g ((getVar l), (Assign (getSign l) dl False))) vs
     --Solverを更新
     updateSolving :: Solving -> [(Literal, [Var])] -> Solving
     updateSolving s ds = s {_binds = newBinds, _implication_graph = newGraph}
@@ -228,6 +370,25 @@ propagate s dl = if null allUnitClauseData then
 --    newBinds = M.insert v No (_binds s)
 
 {-
+- Conflict Analysys
+-}
+buildFGLGraph :: ImplicationGraph -> Level -> FT.Gr Int Int
+buildFGLGraph g dl = undefined
+
+analyze :: Solving -> RootDecisionVar -> ConflictVar -> (Clause, Level, (Var, Assign))
+analyze s r conflictVar = (learningClause, jmpLevel, getDesicionVariable)
+  where
+    uip = firstUIP (_implication_graph s) r conflictVar
+    learningClause = getLearningClause (_implication_graph s) conflictVar uip
+    rSort :: (Ord a) => [a] -> [a]
+    rSort = L.sortBy (flip compare)
+    literalLevels = rSort $ 0 : (L.nub $ L.map (\v -> (_level ((_binds s) M.! v))) $ L.map getVar (getLiterals learningClause))
+    jmpLevel = (dprint ("literalLevels: " ++ show literalLevels) literalLevels)  L.!! 1
+    --あるレベルの決定変数を取得
+    getDesicionVariable = case M.toList $ M.filter (\a -> (_level a) == jmpLevel && (_decision a)) (_binds s) of
+                            [] -> (undefined, undefined)
+                            (x:_) -> x
+{-
 - 充足可能性
 -}
 emptyCNF :: CNF -> Bool
@@ -244,12 +405,15 @@ asBoolean :: Results -> Bool
 asBoolean (Sat _) = True
 asBoolean Unsat = False
 
-satisfiable' :: Solving -> Level -> Results
-satisfiable' s dl
+satisfiable' :: Solving -> Level -> (Var, Assign) -> Results
+satisfiable' s dl (v, as)
   | results == Yes = Sat cleanuped
-  | results == No = if dl == 0 then Unsat else dprint ("ContradictionReason: " ++ (show (getContradictionReason propagated)) 
-                                                       ++ " and Graph: \n" ++ (show (_implication_graph cleanuped))) Unsat
-  | asBoolean trueResults = trueResults
+  | results == No = if dl == 0 then 
+                      Unsat 
+                    else 
+                      dprint ("Learning clause: " ++ (show learningClause) ++ " back to level: " ++ (show jmpLevel)) $
+                      satisfiable' learnedSolving jmpLevel (dv, das)
+--  | asBoolean trueResults = trueResults
   | asBoolean falseResults = falseResults
   | otherwise = Unsat
   where
@@ -264,18 +428,29 @@ satisfiable' s dl
     getSolving (Success s) = s
     getSolving (Conflict s v) = s
     results = case propagated of
-                Success s -> evalSolving s
-                Conflict s v -> No
+                Success x -> dprint ("Eval solving: " ++ (show (evalSolving x))) (evalSolving x)
+                Conflict _ _ -> No
     unknownvars = M.filter (\x -> _truthValue x == Unknown) (_binds cleanuped)
     unknownvar = head $ M.keys unknownvars
+    --真のブランチ
     trueBranch = dprint ((strRepeat (dl * 3) " ") ++ "trueBranch: " ++ (show unknownvar)) 
-                      $ cleanuped {_binds = (M.insert unknownvar (Assign Yes dl True) (_binds cleanuped))
-                                  ,_implication_graph = (G.addVertex (_implication_graph cleanuped)
-                                  (G.Vertex (unknownvar, (Assign Yes dl True))))}
-    trueResults = satisfiable' trueBranch (dl + 1)
+                      $ cleanuped {_binds = (M.insert unknownvar (Assign Yes (dl + 1) True) (_binds cleanuped))
+                                  ,_implication_graph = (addNode (_implication_graph cleanuped)
+                                                                 (unknownvar, (Assign Yes (dl + 1) True)))
+                                  }
+    trueResults = satisfiable' trueBranch (dl + 1) (unknownvar, (Assign Yes (dl + 1) True))
+    --偽のブランチ
     falseBranch = dprint ((strRepeat (dl * 3) " ") ++ "falseBranch: " ++ (show unknownvar)) 
-                    $ cleanuped {_binds = (M.insert unknownvar (Assign No dl True) (_binds cleanuped))}
-    falseResults = satisfiable' falseBranch (dl + 1)
+                    $ cleanuped {_binds = (M.insert unknownvar (Assign No (dl + 1) True) (_binds cleanuped))
+                                 ,_implication_graph = (addNode (_implication_graph cleanuped)
+                                                                (unknownvar, (Assign No (dl + 1) True)))
+                                }
+    falseResults = satisfiable' falseBranch (dl + 1) (unknownvar, (Assign No (dl + 1) True))
+    --解析
+    (learningClause, jmpLevel, (dv, das)) = analyze cleanuped (v, as) (getContradictionReason propagated)
+    cleanupedSolving = cleanupSolving cleanuped jmpLevel
+    learnedSolving = cleanupedSolving {_solving_cnf = (addClause (_solving_cnf cleanupedSolving) learningClause)}
+
 
 satisfiable :: DIMACS -> Results
 satisfiable dimacs = results
@@ -284,4 +459,4 @@ satisfiable dimacs = results
     defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False)) | x <- [1..(_variableCount dimacs)]]
     results = satisfiable' (Solving {_binds = defaultBinds
                                     ,_solving_cnf = cnf
-                                    ,_implication_graph = G.empty}) 0
+                                    ,_implication_graph = emptyImplicationGraph}) 0 (undefined, undefined)
