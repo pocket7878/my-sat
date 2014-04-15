@@ -53,10 +53,8 @@ parseClause = do {
                  spaces;
                  ls <-parseLiterals;
                  newline;
-                 case (length ls) of
-                   0 -> return EmptyClause
-                   _ -> return $ Clause ls
-                   }
+                 return $ Clause ls;
+                 }
 
 
 parseCNF :: Parser CNF
