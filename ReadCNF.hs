@@ -17,13 +17,13 @@ parseNotLiteral :: Parser Literal
 parseNotLiteral = do {
                      char '-';
                      n <- natural;
-                     return (Not (Var n));
+                     return (Not n);
                      }
 
 parseNormalLiteral :: Parser Literal
 parseNormalLiteral = do {
                         n <- natural;
-                        return (Normal (Var n));
+                        return (Normal n);
                         }
 
 parseLiteral :: Parser Literal
@@ -48,16 +48,13 @@ parseLiterals = do {
                           return [];
                           }
 
-parseClause :: Parser　Clause
+parseClause :: Parser Clause
 parseClause = do {
                  spaces;
                  ls <-parseLiterals;
                  newline;
-                 case (length ls) of
-                   0 -> return EmptyClause
-                   1 -> return $ UnitClause (head ls)
-                   _ -> return $ Clause ls
-                   }
+                 return $ Clause ls;
+                 }
 
 
 parseCNF :: Parser CNF
