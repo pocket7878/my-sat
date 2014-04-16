@@ -1,6 +1,8 @@
+{-# LANGUAGE StandaloneDeriving #-}
 module Solver where
 
 import qualified Data.Map as M
+import qualified Data.Monoid as Monoid
 import qualified Data.Maybe as Maybe
 import qualified Data.List as L
 import DIMACS
@@ -26,7 +28,14 @@ data Assign = Assign {
             _truthValue :: TruthValue
             ,_level :: Level
             ,_decision :: DecisionFlag
-            } deriving (Show, Eq, Ord)
+            ,_priority :: Double
+            } deriving (Show)
+
+instance Eq Assign where
+    a == b = (_truthValue a) == (_truthValue b) && (_level a) == (_level b) && (_decision a) == (_decision b)
+
+instance Ord Assign where
+    a `compare` b = ((_truthValue a) `compare` (_truthValue b)) `Monoid.mappend` ((_level a) `compare` (_level b)) `Monoid.mappend` ((_decision a) `compare` (_decision b))
 
 type Assignment = M.Map Var Assign
 
@@ -75,7 +84,7 @@ firstUIP :: ImplicationGraph -> RootDecisionVar -> ConflictVar -> FGL.Node
 firstUIP g r c = head uipNodes
   where
     rootId :: FGL.Node
-    rootId = (_node_table g) M.! r
+    rootId =  (dprint ("Lookup from: " ++ (show (_node_table g))) (_node_table g)) M.! (dprint ("Root: " ++ (show r)) r)
     conflictId :: [FGL.Node]
     conflictId = dprint ("ConflictIds: " ++ (show $ L.map (\(c,_) -> (_node_table g) M.! c) $ M.toList $ M.filterWithKey (\(k, _) _ -> k == c) (_node_table g))) $
                         L.map (\(c,_) -> (_node_table g) M.! c) $ M.toList $ M.filterWithKey (\(k, _) _ -> k == c) (_node_table g)
@@ -154,7 +163,7 @@ cleanupGraph g l = g {_graph = newGraph
 
 --バインドからあるレベル以上のバインドを削る
 cleanupBind :: Assignment -> Level -> Assignment
-cleanupBind a l = M.map (\as -> if (_level as) > l then as {_truthValue = Unknown, _decision = False} else as) a
+cleanupBind a l = M.map (\as -> if (_level as) > l then as {_truthValue = Unknown, _level = 0, _decision = False} else as) a
 
 --Solvingからあるレベル以上の値を消す
 cleanupSolving :: Solving -> Level -> Solving
@@ -175,6 +184,12 @@ data Solving = Solving {
 strRepeat :: Int -> String -> String
 strRepeat 0 _ = ""
 strRepeat n str = str ++ (strRepeat (n - 1) str)
+
+rSortBy :: (a -> a -> Ordering) -> [a] -> [a]
+rSortBy = L.sortBy . flip
+
+rSort :: (Ord a) => [a] -> [a]
+rSort = rSortBy compare
 
 getClause :: CNF -> [Clause]
 getClause (CNF cs) = cs
@@ -274,15 +289,19 @@ propagate s dl = if null allUnitClauseData then
     --グラフにリテラルと変数のペアのエッジを追加する
     updateGraph :: ImplicationGraph -> Literal  -> [Var] -> Assignment -> ImplicationGraph
     updateGraph g l vs as = L.foldl' (\g from -> connect g (from, (as M.! from))
-                                                           ((getVar l), (Assign (getSign l) dl False)))
-                                (addNode g ((getVar l), (Assign (getSign l) dl False))) vs
+                                                           ((getVar l), newLAssign))
+                                (addNode g ((getVar l), newLAssign)) vs
+      where
+        lAssign = (as M.! (getVar l))
+        newLAssign = lAssign {_truthValue = (getSign l), _level = dl, _decision = False}
     --Solverを更新
     updateSolving :: Solving -> [(Literal, [Var])] -> Solving
     updateSolving s ds = s {_binds = newBinds, _implication_graph = newGraph}
       where
         newBinds = L.foldl' (\b l -> dprint ((strRepeat (dl * 3) " ") ++ "Bind " ++ (show (getVar l)) ++ " to :" ++ (show (getSign l))) $
-                                      M.insert (getVar l) (Assign (getSign l) dl False) b) (_binds s) $ L.map fst ds
-        newGraph = L.foldl' (\g (l, vs) -> updateGraph g l vs newBinds) (_implication_graph s) ds
+                                      M.adjust (\as -> as {_truthValue = (getSign l), _level = dl, _decision = False})
+                                            (getVar l) b) (_binds s) $ L.map fst ds
+        newGraph = L.foldl' (\g (l, vs) -> updateGraph g l vs newBinds) (_implication_graph s) $ dprint ("updateGraphfor: " ++ (show ds)) ds
     
 
 {-
@@ -380,8 +399,6 @@ analyze s r conflictVar = (learningClause, jmpLevel, getDesicionVariable)
   where
     uip = firstUIP (_implication_graph s) r conflictVar
     learningClause = getLearningClause (_implication_graph s) conflictVar uip
-    rSort :: (Ord a) => [a] -> [a]
-    rSort = L.sortBy (flip compare)
     literalLevels = rSort $ 0 : (L.nub $ L.map (\v -> (_level ((_binds s) M.! v))) $ L.map getVar (getLiterals learningClause))
     jmpLevel = (dprint ("literalLevels: " ++ show literalLevels) literalLevels)  L.!! 1
     --あるレベルの決定変数を取得
@@ -405,6 +422,18 @@ asBoolean :: Results -> Bool
 asBoolean (Sat _) = True
 asBoolean Unsat = False
 
+--Varの優先度を確認して高過ぎたら全体を均等に下げる(定数で割
+--る)
+rescalePriority :: Assignment -> Assignment
+rescalePriority as = if maxpri > 1e100 then
+                       rescalePriority' as
+                     else
+                       as
+  where
+    maxpri = maximum $ L.map (\(_, a) -> (_priority a)) $ M.toList as
+    rescalePriority' :: Assignment -> Assignment
+    rescalePriority' as = M.map (\a -> a {_priority = (_priority a) * 1e-100}) as
+
 satisfiable' :: Solving -> Level -> (Var, Assign) -> Results
 satisfiable' s dl (v, as)
   | results == Yes = Sat cleanuped
@@ -413,9 +442,7 @@ satisfiable' s dl (v, as)
                     else 
                       dprint ("Learning clause: " ++ (show learningClause) ++ " back to level: " ++ (show jmpLevel)) $
                       satisfiable' learnedSolving jmpLevel (dv, das)
---  | asBoolean trueResults = trueResults
-  | asBoolean falseResults = falseResults
-  | otherwise = Unsat
+  | otherwise = nextResults
   where
     propagated :: PropagateResults
     propagated = propagate s dl
@@ -430,33 +457,34 @@ satisfiable' s dl (v, as)
     results = case propagated of
                 Success x -> dprint ("Eval solving: " ++ (show (evalSolving x))) (evalSolving x)
                 Conflict _ _ -> No
+    --VSIDS:未決定の変数のうち優先度の高いものから選ぶ
     unknownvars = M.filter (\x -> _truthValue x == Unknown) (_binds cleanuped)
-    unknownvar = head $ M.keys unknownvars
-    --真のブランチ
-    trueBranch = dprint ((strRepeat (dl * 3) " ") ++ "trueBranch: " ++ (show unknownvar)) 
-                      $ cleanuped {_binds = (M.insert unknownvar (Assign Yes (dl + 1) True) (_binds cleanuped))
-                                  ,_implication_graph = (addNode (_implication_graph cleanuped)
-                                                                 (unknownvar, (Assign Yes (dl + 1) True)))
-                                  }
-    trueResults = satisfiable' trueBranch (dl + 1) (unknownvar, (Assign Yes (dl + 1) True))
-    --偽のブランチ
-    falseBranch = dprint ((strRepeat (dl * 3) " ") ++ "falseBranch: " ++ (show unknownvar)) 
-                    $ cleanuped {_binds = (M.insert unknownvar (Assign No (dl + 1) True) (_binds cleanuped))
+    unknownvar = fst $ head $ rSortBy (\(_, a1) (_, a2) -> compare (_priority a1) (_priority a2)) $ M.toList unknownvars
+    --次のブランチ,選んだ未決定の変数に常に偽を割り当てる
+    nextBranch = dprint ((strRepeat (dl * 3) " ") ++ "nextBranch: " ++ (show unknownvar)) 
+                    $ cleanuped {_binds = (M.adjust (\as -> as {_truthValue = No, _level = (dl + 1), _decision = True})
+                                                    unknownvar (_binds cleanuped))
                                  ,_implication_graph = (addNode (_implication_graph cleanuped)
-                                                                (unknownvar, (Assign No (dl + 1) True)))
+                                                                (unknownvar, (Assign No (dl + 1) True 
+                                                                              (_priority ((_binds cleanuped) M.! unknownvar)))))
                                 }
-    falseResults = satisfiable' falseBranch (dl + 1) (unknownvar, (Assign No (dl + 1) True))
+    nextResults = satisfiable' nextBranch (dl + 1) (unknownvar, ((_binds nextBranch) M.! unknownvar))
     --解析
     (learningClause, jmpLevel, (dv, das)) = analyze cleanuped (v, as) (getContradictionReason propagated)
     cleanupedSolving = cleanupSolving cleanuped jmpLevel
-    learnedSolving = cleanupedSolving {_solving_cnf = (addClause (_solving_cnf cleanupedSolving) learningClause)}
-
+    learnedSolving = cleanupedSolving {_solving_cnf = (addClause (_solving_cnf cleanupedSolving) learningClause)
+                                       ,_binds = rescalePriority $ L.foldl' (\b v -> (M.adjust (\as -> as {_priority = (_priority as) + 1})
+                                                                                       v b)) (_binds cleanupedSolving) 
+                                                                               (L.map getVar (getLiterals learningClause))
+                                                                   }
 
 satisfiable :: DIMACS -> Results
 satisfiable dimacs = results
   where
     cnf = _cnf dimacs
-    defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False)) | x <- [1..(_variableCount dimacs)]]
+    --全ての変数の初期わりあて、全ての変数は最初は未確定の非決定変数の
+    --優先度0になっている
+    defaultBinds = M.fromList $ [(x, (Assign Unknown 0 False 0)) | x <- [1..(_variableCount dimacs)]]
     results = satisfiable' (Solving {_binds = defaultBinds
                                     ,_solving_cnf = cnf
                                     ,_implication_graph = emptyImplicationGraph}) 0 (undefined, undefined)
