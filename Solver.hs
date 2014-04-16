@@ -28,7 +28,7 @@ data Assign = Assign {
             _truthValue :: TruthValue
             ,_level :: Level
             ,_decision :: DecisionFlag
-            ,_priority :: Int
+            ,_priority :: Double
             } deriving (Show)
 
 instance Eq Assign where
@@ -422,6 +422,18 @@ asBoolean :: Results -> Bool
 asBoolean (Sat _) = True
 asBoolean Unsat = False
 
+--Varの優先度を確認して高過ぎたら全体を均等に下げる(定数で割
+--る)
+rescalePriority :: Assignment -> Assignment
+rescalePriority as = if maxpri > 1e100 then
+                       rescalePriority' as
+                     else
+                       as
+  where
+    maxpri = maximum $ L.map (\(_, a) -> (_priority a)) $ M.toList as
+    rescalePriority' :: Assignment -> Assignment
+    rescalePriority' as = M.map (\a -> a {_priority = (_priority a) * 1e-100}) as
+
 satisfiable' :: Solving -> Level -> (Var, Assign) -> Results
 satisfiable' s dl (v, as)
   | results == Yes = Sat cleanuped
@@ -461,9 +473,9 @@ satisfiable' s dl (v, as)
     (learningClause, jmpLevel, (dv, das)) = analyze cleanuped (v, as) (getContradictionReason propagated)
     cleanupedSolving = cleanupSolving cleanuped jmpLevel
     learnedSolving = cleanupedSolving {_solving_cnf = (addClause (_solving_cnf cleanupedSolving) learningClause)
-                                       ,_binds = L.foldl' (\b v -> (M.adjust (\as -> as {_priority = (_priority as) + 1})
-                                                                             v b)) (_binds cleanupedSolving) 
-                                                                   (L.map getVar (getLiterals learningClause))
+                                       ,_binds = rescalePriority $ L.foldl' (\b v -> (M.adjust (\as -> as {_priority = (_priority as) + 1})
+                                                                                       v b)) (_binds cleanupedSolving) 
+                                                                               (L.map getVar (getLiterals learningClause))
                                                                    }
 
 satisfiable :: DIMACS -> Results
